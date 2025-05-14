@@ -1,5 +1,75 @@
 import json
 import torch.nn as nn
+import torch
+import math
+from torch.nn import functional as F
+
+class SelfAttention(nn.Module):
+    """
+    The Self-Attention mechanism, allowing the model to attend to different
+    parts of the input sequence when processing each token.
+
+    It computes attention scores based on the relationships between tokens
+    and uses these scores to weigh the importance of other tokens when
+    representing the current token. This implementation uses multi-head
+    attention for richer representations and causal masking for autoregressive
+    generation.
+    """
+    def __init__(self, config):
+        super().__init__()
+        assert config["d_model"] % config["num_heads"] == 0
+
+        #q, k, v projections
+
+        #linear layer to combine attention heads
+        self.c_attn = self.Linear(config["d_model"], 3 * config["d_model"]) 
+
+        #linear layer for output projection
+        self.c_proj = nn.Linear(config["d_model"], config["d_model"])
+
+        #mask to prevent seeing future token (lower triangle)
+        self.register_buffer("bias", torch.tril(torch.ones(config["seq_len"],  config["seq_len"])).view(1, 1, config["seq_len"], config["seq_len"]))
+
+        self.num_heads = config["num_heads"]
+        self.d_model = config["d_model"]
+
+    def forward(self, x):
+
+        #Batch size, Sequence length, and Embedding dimension
+        B, T, C = x.size()
+
+        # Apply the combined linear layer to get query, key, and value projections
+        # Shape: (B, T, 3 * d_model)
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.d_model, dim=2)
+
+        #Reshape tensors to prepare for multi head attention
+        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
+        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
+        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
+
+        #Calculate attention score
+        att = (q @ v.transpose(-2, 1)) * (1.0 / math.sqrt(k.size(-1)))
+
+        #Mask attention scores
+        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+
+        #Get attention weights
+        att = F.softmax(att, dim=-1)
+
+        #Weighted values
+        y = att @ v
+
+        #Reshape and concatenate to prepare for output
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+
+        #Apply output projection
+        y = self.c_proj(y)
+
+        return y
+        
+
+    
 
 
 class FFN(nn.Module):
