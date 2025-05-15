@@ -212,7 +212,8 @@ def main():
     with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
-    model = GPT.from_pretrained('gpt2', hyperparameters)
+    #model = GPT.from_pretrained('gpt2', hyperparameters)
+    model = GPT(hyperparameters)
     model.eval()
     #model.to('cuda')
 
