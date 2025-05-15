@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch
 import math
 from torch.nn import functional as F
+from transformers import GPT2LMHeadModel
+import tiktoken
 
 class SelfAttention(nn.Module):
     """
@@ -22,7 +24,7 @@ class SelfAttention(nn.Module):
         #q, k, v projections
 
         #linear layer to combine attention heads
-        self.c_attn = self.Linear(config["d_model"], 3 * config["d_model"]) 
+        self.c_attn = nn.Linear(config["d_model"], 3 * config["d_model"]) 
 
         #linear layer for output projection
         self.c_proj = nn.Linear(config["d_model"], config["d_model"])
@@ -32,9 +34,9 @@ class SelfAttention(nn.Module):
 
         self.num_heads = config["num_heads"]
         self.d_model = config["d_model"]
+        self.seq_len = config["seq_len"] # Store sequence length
 
     def forward(self, x):
-
         #Batch size, Sequence length, and Embedding dimension
         B, T, C = x.size()
 
@@ -44,12 +46,12 @@ class SelfAttention(nn.Module):
         q, k, v = qkv.split(self.d_model, dim=2)
 
         #Reshape tensors to prepare for multi head attention
-        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
-        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2)
+        k = k.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
 
         #Calculate attention score
-        att = (q @ v.transpose(-2, 1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 
         #Mask attention scores
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
@@ -68,11 +70,7 @@ class SelfAttention(nn.Module):
 
         return y
         
-
-    
-
-
-class FFN(nn.Module):
+class MLP(nn.Module):
     """
     The Feed-Forward Network (FFN) within each Transformer block.
 
@@ -83,14 +81,14 @@ class FFN(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
-        self.expand = nn.Linear(config["d_model"], 4 * config["d_model"])
-        self.gelu = nn.GELU()
-        self.reduce = nn.Linear(4 * config["d_model"], config["d_model"])
+        self.c_fc = nn.Linear(config["d_model"], 4 * config["d_model"])
+        self.gelu = nn.GELU(approximate='tanh')
+        self.c_proj = nn.Linear(4 * config["d_model"], config["d_model"])
 
     def forward(self, x):
-        x = self.expand(x)
+        x = self.c_fc(x)
         x = self.gelu(x)
-        x = self.reduce(x)
+        x = self.c_proj(x)
         return x
 
 class Block(nn.Module):
@@ -106,13 +104,14 @@ class Block(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(config["d_model"])
+        self.ln_1 = nn.LayerNorm(config["d_model"])
         self.attn = SelfAttention(config)
-        self.ffn = FFN(config)
+        self.ln_2 = nn.LayerNorm(config["d_model"])
+        self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.layer_norm(x))
-        x = x + self.ffn(self.layer_norm(x))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 class GPT(nn.Module):
@@ -128,6 +127,7 @@ class GPT(nn.Module):
     """
     def __init__(self, config):
         super().__init__()
+        self.config = config
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config["vocab_size"], config["d_model"]),
@@ -136,14 +136,119 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config["d_model"]),
         ))
         self.lm_head = nn.Linear(config["d_model"], config["vocab_size"], bias=False)
+        self.seq_len = config["seq_len"]
+
+    def forward(self, idx):
+        B, T = idx.size()
+        assert T <= self.seq_len, f"Cannot forward sequence of length {T}, block size is only {self.seq_len}"
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (t)
+
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        
+        return logits
+
+    @classmethod
+    def from_pretrained(cls, model_type, gpt_config):
+        assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
+      
+        print("loading weights from pretrained gpt: %s" % model_type)
+
+        # n_layer, n_head and n_embd are determined from model_type
+        config_args = {
+            'gpt2':         dict(n_layer=12, n_head=12, n_embd=768),  # 124M params
+            'gpt2-medium':  dict(n_layer=24, n_head=16, n_embd=1024), # 350M params
+            'gpt2-large':   dict(n_layer=36, n_head=20, n_embd=1280), # 774M params
+            'gpt2-xl':      dict(n_layer=48, n_head=25, n_embd=1600), # 1558M params
+        }[model_type]
+        print("forcing vocab_size=50257, block_size=1024, bias=True")
+        config_args['vocab_size'] = 50257 # always 50257 for GPT model checkpoints
+        config_args['seq_len'] = 1024 # always 1024 for GPT model checkpoints
+    
+        config = gpt_config
+        model = GPT(config)
+        sd = model.state_dict()
+        sd_keys = sd.keys()
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+
+        # init a huggingface/transformers model
+        model_hf = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = model_hf.state_dict()
+
+        # copy while ensuring all of the parameters are aligned and match in names and shapes
+        sd_keys_hf = sd_hf.keys()
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
+        # this means that we have to transpose these weights when we import them
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+        for k in sd_keys_hf:
+            if any(k.endswith(w) for w in transposed):
+                # special treatment for the Conv1D weights we need to transpose
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                # vanilla copy over the other parameters
+                assert sd_hf[k].shape == sd[k].shape
+                with torch.no_grad():
+                    sd[k].copy_(sd_hf[k])
+
+        return model
+
+
 
 def main():
-    """Loads hyperparameters and initializes the GPT model."""
     # Load hyperparameters
     with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
-    GPT(hyperparameters)
+    model = GPT.from_pretrained('gpt2', hyperparameters)
+    model.eval()
+    #model.to('cuda')
+
+    enc = tiktoken.get_encoding("gpt2")
+    tokens = enc.encode("Hello, I am a language model,")
+
+    tokens = torch.tensor(tokens, dtype=torch.long)
+    tokens = tokens.unsqueeze(0).repeat(hyperparameters["num_return_sequences"], 1)
+    x = tokens
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
+
+    max_length = hyperparameters.get("max_length", 50) # Use get() with a default value
+    while x.size(1) < max_length:
+        with torch.no_grad():
+            logits = model(x)
+
+            logits = logits[:, -1, :]
+
+            probs = F.softmax(logits, dim=-1)
+
+            topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+
+            ix = torch.multinomial(topk_probs, 1)
+
+            xcol = torch.gather(topk_indices, -1, ix)
+
+            x = torch.cat((x, xcol), dim=1)
+
+    for i in range(hyperparameters["num_return_sequences"]):
+        tokens = x[i, :max_length].tolist()
+        decoded = enc.decode(tokens)
+        print(">", decoded)
+
+
 
 if __name__ == "__main__":
     main()

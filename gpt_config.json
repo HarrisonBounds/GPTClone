@@ -3,5 +3,7 @@
     "vocab_size": 50257,
     "num_layers": 12,
     "num_heads": 12,
-    "d_model": 768
+    "d_model": 768,
+    "num_return_sequences": 5,
+    "max_length": 30
 }
