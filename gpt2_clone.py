@@ -205,8 +205,6 @@ class GPT(nn.Module):
 
         return model
 
-
-
 def main():
     # Load hyperparameters
     with open('gpt_config.json', 'r') as f:
@@ -248,8 +246,6 @@ def main():
         tokens = x[i, :max_length].tolist()
         decoded = enc.decode(tokens)
         print(">", decoded)
-
-
 
 if __name__ == "__main__":
     main()
