@@ -3,10 +3,43 @@ import tiktoken
 import torch
 import json
 
+#------------------------------------------------------------------------------------------------------------
+class DataLoaderTest:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+
+        #Get data
+        with open('input.txt', 'r') as f:
+            text = f.read()
+
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+
+        self.current_position = 0
+
+        print("Number of tokens loaded: ", len(self.tokens))
+        print(f"1 epochs = {len(self.tokens) // (B * T)} batches")
+
+
+    def next_batch(self):
+        B, T = self.B, self.T
+
+        #Leave on the CPU for now
+        buf = self.tokens[self.current_position :  self.current_position + B*T+1]
+        x = (buf[:-1]).view(B, T)
+        y = (buf[1:]).view(B, T)
+        self.current_position += B * T
+
+        #Wrap back arounf if next batch is out of bounds
+        if self.current_position + (B * T + 1) > len(self.tokens):
+             self.current_position = 0
+
+        return x, y
 
 #------------------------------------------------------------------------------------------------------------
 
-enc = tiktoken.get_encoding("gpt2")
 
 #Get Device
 if torch.cuda.is_available():
@@ -20,17 +53,9 @@ print("Device: ", device)
 with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
-#Get data
-with open('input.txt', 'r') as f:
-      text = f.read()
 
-text = text[:1000]
-tokens = enc.encode(text)
-B, T = 4, 32
-buf = torch.tensor(tokens[:B*T + 1])
-buf = buf.to(device)
-x = buf[:-1].view(B, T)
-y = buf[1:].view(B, T)
+train_loader = DataLoaderTest(B=4, T=32)
+
 
 #Get logits
 model = GPT(hyperparameters)
@@ -40,11 +65,13 @@ model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
 for i in range(50):
+    x, y = train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"Step{i+1} : Loss = {loss.item()}")
+    print(f"Step {i+1} : Loss = {loss.item()}")
 
 
 
