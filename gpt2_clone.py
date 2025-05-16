@@ -138,7 +138,7 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config["d_model"], config["vocab_size"], bias=False)
         self.seq_len = config["seq_len"]
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <= self.seq_len, f"Cannot forward sequence of length {T}, block size is only {self.seq_len}"
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (t)
@@ -152,9 +152,13 @@ class GPT(nn.Module):
             x = block(x)
 
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        logits = self.lm_head(x) #(B, T, vocab_size)
+
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         
-        return logits
+        return logits, loss
 
     @classmethod
     def from_pretrained(cls, model_type, gpt_config):
@@ -206,6 +210,13 @@ class GPT(nn.Module):
         return model
 
 def main():
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+
+    print("Device: ", device)
+    
     # Load hyperparameters
     with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
