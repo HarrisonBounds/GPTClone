@@ -28,6 +28,7 @@ class SelfAttention(nn.Module):
 
         #linear layer for output projection
         self.c_proj = nn.Linear(config["d_model"], config["d_model"])
+        self.c_proj.SCALE_INIT = 1
 
         #mask to prevent seeing future token (lower triangle)
         self.register_buffer("bias", torch.tril(torch.ones(config["seq_len"],  config["seq_len"])).view(1, 1, config["seq_len"], config["seq_len"]))
@@ -84,6 +85,8 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config["d_model"], 4 * config["d_model"])
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config["d_model"], config["d_model"])
+        self.c_proj.SCALE_INIT = 1
+
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -138,8 +141,22 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config["d_model"], config["vocab_size"], bias=False)
         self.seq_len = config["seq_len"]
 
-        #weight sharing - done in GPT2
+        #weight sharing - done in GPT2 - more efficient in training process - saves parameters
         self.transformer.wte.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        std = 0.02
+        #Scale down standard deviation - 2 * layers comes from attention and MLP
+        if hasattr(module, 'SCALE_INIT'):
+            std *= (2 * self.config["num_layers"]) ** 0.5
+        if isinstance(module, nn.Linear):
+            torch.nn.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
