@@ -2,6 +2,7 @@ from gpt2_clone import GPT
 import tiktoken
 import torch
 import json
+import time
 
 #------------------------------------------------------------------------------------------------------------
 class DataLoaderTest:
@@ -54,25 +55,34 @@ with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
 
-train_loader = DataLoaderTest(B=4, T=32)
+train_loader = DataLoaderTest(B=16, T=128)
 
+torch.set_float32_matmul_precision("high")
 
 #Get logits
 model = GPT(hyperparameters)
 model.to(device)
+model = torch.compile(model)
 
 #Optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
+
     loss.backward()
     optimizer.step()
-    print(f"Step {i+1} : Loss = {loss.item()}")
 
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = (t1-t0) * 1000
 
+    tps = (train_loader.B * train_loader.T) / (t1-t0)
 
-
+    print(f"Step: {i+1}, Loss: {loss.item()}, time: {dt} ms, tok/sec: {tps}")
