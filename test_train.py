@@ -64,8 +64,8 @@ model = GPT(hyperparameters)
 model.to(device)
 model = torch.compile(model)
 
-#Optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+#Optimizer - GPT3 hyperparamters
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, )
 
 for i in range(50):
     t0 = time.time()
@@ -77,6 +77,7 @@ for i in range(50):
         logits, loss = model(x, y)
 
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
 
     torch.cuda.synchronize()
