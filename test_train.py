@@ -3,6 +3,7 @@ import tiktoken
 import torch
 import json
 import time
+import math
 
 #------------------------------------------------------------------------------------------------------------
 class DataLoaderTest:
@@ -41,6 +42,25 @@ class DataLoaderTest:
 
 #------------------------------------------------------------------------------------------------------------
 
+#Manual LR scheduler
+def get_lr(it, config, min_lr):
+    
+    if it < config["warmup_steps"]:
+        return config["max_lr"] * (it+1) / config["warmup_steps"]
+    
+    if it > config["max_steps"]:
+        return min_lr
+    
+    decay_ratio = (it - config["warmup_steps"]) / (config["max_steps"] - config["warmup_steps"])
+
+    assert 0 <= decay_ratio <= 1
+
+    coeff =  0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+
+    return min_lr + coeff * (config["max_lr"] - min_lr)
+    
+
+#------------------------------------------------------------------------------------------------------------
 
 #Get Device
 if torch.cuda.is_available():
@@ -55,7 +75,7 @@ with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
 
-train_loader = DataLoaderTest(B=16, T=128)
+train_loader = DataLoaderTest(B=8, T=1024)
 
 torch.set_float32_matmul_precision("high")
 
@@ -64,10 +84,12 @@ model = GPT(hyperparameters)
 model.to(device)
 model = torch.compile(model)
 
-#Optimizer - GPT3 hyperparamters
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8, )
+min_lr = hyperparameters["max_lr"] * 0.1
 
-for i in range(50):
+#Optimizer - GPT3 hyperparamters
+optimizer = torch.optim.AdamW(model.parameters(), lr=hyperparameters["max_lr"], betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1)
+
+for step in range(hyperparameters["max_steps"]):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
@@ -77,7 +99,12 @@ for i in range(50):
         logits, loss = model(x, y)
 
     loss.backward()
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) #gradient norm clipping
+
+    lr = get_lr(step, hyperparameters, min_lr)
+    for param_group in optimizer.param_groups:
+         param_group["lr"] = lr
+
     optimizer.step()
 
     torch.cuda.synchronize()
@@ -86,4 +113,4 @@ for i in range(50):
 
     tps = (train_loader.B * train_loader.T) / (t1-t0)
 
-    print(f"Step: {i+1}, Loss: {loss.item()}, time: {dt} ms, tok/sec: {tps}")
+    print(f"Step: {step+1}, Loss: {loss.item()}, LR: {lr}, time: {dt} ms, tok/sec: {tps}")

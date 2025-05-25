@@ -5,5 +5,8 @@
     "num_heads": 12,
     "d_model": 768,
     "num_return_sequences": 5,
-    "max_length": 30
+    "max_length": 30,
+    "warmup_steps": 10,
+    "max_steps": 50,
+    "max_lr": 6e-4
 }
