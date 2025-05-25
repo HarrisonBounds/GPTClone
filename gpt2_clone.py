@@ -51,17 +51,20 @@ class SelfAttention(nn.Module):
         q = q.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.num_heads, C // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
 
-        #Calculate attention score
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # #Calculate attention score
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
 
-        #Mask attention scores
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
+        # #Mask attention scores
+        # att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
 
-        #Get attention weights
-        att = F.softmax(att, dim=-1)
+        # #Get attention weights
+        # att = F.softmax(att, dim=-1)
 
-        #Weighted values
-        y = att @ v
+        # #Weighted values
+        # y = att @ v
+
+        #Call Flash attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
         #Reshape and concatenate to prepare for output
         y = y.transpose(1, 2).contiguous().view(B, T, C)
