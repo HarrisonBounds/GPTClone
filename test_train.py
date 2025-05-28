@@ -74,8 +74,14 @@ print("Device: ", device)
 with open('gpt_config.json', 'r') as f:
         hyperparameters = json.load(f)
 
+total_batch_size = 524288
+B = 32
+T = 1024
+#gradient accumulation
+grad_accum_steps = total_batch_size // (B*T)
+print(f"grad accumulation: {grad_accum_steps}")
 
-train_loader = DataLoaderTest(B=8, T=1024)
+train_loader = DataLoaderTest(B=B, T=T)
 
 torch.set_float32_matmul_precision("high")
 
@@ -91,14 +97,20 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=hyperparameters["max_lr"], 
 
 for step in range(hyperparameters["max_steps"]):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
+    loss_accum = 0.0
 
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
 
-    loss.backward()
+        loss = loss / grad_accum_steps #scale the loss down and apply mean
+        loss_accum += loss.detach() #values instead of tensors
+        loss.backward()
+
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) #gradient norm clipping
 
     lr = get_lr(step, hyperparameters, min_lr)
@@ -109,8 +121,8 @@ for step in range(hyperparameters["max_steps"]):
 
     torch.cuda.synchronize()
     t1 = time.time()
-    dt = (t1-t0) * 1000
+    dt = t1-t0
 
-    tps = (train_loader.B * train_loader.T) / (t1-t0)
+    tps = (train_loader.B * train_loader.T * grad_accum_steps) / dt
 
-    print(f"Step: {step+1}, Loss: {loss.item()}, LR: {lr}, time: {dt} ms, tok/sec: {tps}")
+    print(f"Step: {step+1}, Loss: {loss.item()}, LR: {lr}, time: {dt * 1000} ms, tok/sec: {tps}")
