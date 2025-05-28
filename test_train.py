@@ -4,6 +4,8 @@ import torch
 import json
 import time
 import math
+import os
+from torch.distributed import init_process_group, destroy_process_group
 
 #------------------------------------------------------------------------------------------------------------
 class DataLoaderTest:
@@ -62,11 +64,29 @@ def get_lr(it, config, min_lr):
 
 #------------------------------------------------------------------------------------------------------------
 
-#Get Device
-if torch.cuda.is_available():
-        device = "cuda"
+#Distributed Data Parallel (DDP), using multiple GPUs for training
+ddp = int(os.environ.get('RANK', -1)) != -1
+
+if ddp:
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f"cuda:{ddp_local_rank}"
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
 else:
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+
     device = "cpu"
+    if torch.cuda.is_available():
+            device = "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
 
 print("Device: ", device)
 
@@ -78,8 +98,15 @@ total_batch_size = 524288
 B = 32
 T = 1024
 #gradient accumulation
-grad_accum_steps = total_batch_size // (B*T)
-print(f"grad accumulation: {grad_accum_steps}")
+grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
+
+#Only print if GPU is master process
+if master_process:
+    print(f"grad accumulation: {grad_accum_steps}")
+
+print(f"I am GPU rank {ddp_rank}")
+
+import sys ; sys.exit(0)
 
 train_loader = DataLoaderTest(B=B, T=T)
 
