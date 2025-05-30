@@ -10,9 +10,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn import functional as F
-
 from gpt2_clone import GPT
-
+from hellaswag import render_example, iterate_examples, get_most_likely_row
 
 def load_tokens(filepath):
     npt = np.load(filepath)
@@ -208,15 +207,18 @@ def main():
     min_lr = hyperparameters["max_lr"] * 0.1
 
     print("Starting training loop...")
+    last_step = False
     for step in range(hyperparameters["max_steps"]):
         t0 = time.time()
+        if step == hyperparameters["max_steps"] - 1:
+            last_step = True
 
-        if step % 5000 == 0:
+        if step % 5000 == 3:
             if master_process:
                 save_checkpoint(model, optimizer, step + 1, checkpoint_dir, ddp, hyperparameters)
 
         # --- Validation and Sampling ---
-        if step % 500 == 0:
+        if step % 500 == 3 or last_step:
             print(f"--- Running sampling at step {step + 1} ---")
             #Validation
             model.eval()
@@ -243,7 +245,7 @@ def main():
                 print(f"Validation Loss:{val_loss_accum.item():.4f}")
                 writer.add_scalar("Loss/val", val_loss_accum.item(), step)
         
-        if step % 500 == 0:
+        if step % 500 == 3 or last_step:
             model.eval()
             num_return_sequences = 3
             max_new_tokens = 32
@@ -270,7 +272,37 @@ def main():
                     decoded = enc.decode(tokens)
                     print(f"Rank: {ddp_rank}\nSample: {decoded}")
 
-    
+        if step % 250 == 0 or last_step:
+            num_correct_norm = 0
+            num_total = 0
+            for i, example in enumerate(iterate_examples("val")):
+                if i % ddp_world_size != ddp_rank:
+                    continue
+                # render the example into tokens and labels
+                _, tokens, mask, label = render_example(example)
+                tokens = tokens.to(device)
+                mask = mask.to(device)
+                # get the logits
+                with torch.no_grad():
+                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                        logits, loss = model(tokens)
+                    pred_norm = get_most_likely_row(tokens, mask, logits)
+                num_total += 1
+                num_correct_norm += int(pred_norm == label)
+            # reduce the stats across all processes
+            if ddp:
+                num_total = torch.tensor(num_total, dtype=torch.long, device=device)
+                num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
+                dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+                dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+                num_total = num_total.item()
+                num_correct_norm = num_correct_norm.item()
+            acc_norm = num_correct_norm / num_total
+            if master_process:
+                print(f"HellaSwag accuracy: {acc_norm:.4f}")
+                writer.add_scalar("hellaswag/acc", acc_norm, step)
+                
+
         optimizer.zero_grad()
         loss_accum = 0.0
         model.train()
@@ -322,7 +354,6 @@ def main():
             writer.add_scalar("Tokens_per_second", tokens_per_sec, step)
             writer.add_scalar("Learning_rate", lr, step)
             writer.add_scalar("Time_per_step_ms", dt * 1000, step)
-
 
     if ddp:
         destroy_process_group()
