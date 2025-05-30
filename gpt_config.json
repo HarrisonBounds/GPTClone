@@ -6,7 +6,7 @@
     "d_model": 768,
     "num_return_sequences": 5,
     "max_length": 30,
-    "warmup_steps": 10,
-    "max_steps": 50,
+    "warmup_steps": 715,
+    "max_steps": 19073,
     "max_lr": 6e-4
 }
