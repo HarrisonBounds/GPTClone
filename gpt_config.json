@@ -1,5 +1,7 @@
 {
     "seq_len": 1024,
+    "batch_size": 48,
+    "total_batch_size": 524288,
     "vocab_size": 50304,
     "num_layers": 12,
     "num_heads": 12,
