@@ -33,6 +33,8 @@ class DataLoader:
         self.tokens = self._load_current_shard()
         self.current_position = self.B * self.T * self.process_rank
 
+        self.reset()
+
     def _get_shard_filepaths(self, split):
         shards = os.listdir(self.data_folder)
         shards = [s for s in shards if split in s]
@@ -42,6 +44,11 @@ class DataLoader:
 
     def _load_current_shard(self):
         return load_tokens(self.shards[self.current_shard_idx])
+
+    def reset(self):
+        self.current_shard_idx = 0
+        self.tokens = self._load_current_shard()
+        self.current_position = self.B * self.T * self.process_rank
 
     def next_batch(self):
         B, T = self.B, self.T
@@ -129,7 +136,25 @@ def create_model_and_optimizer(hyperparameters, device, ddp, ddp_local_rank):
     )
     return model, optimizer
 
-# --- Main Training Loop ---
+
+def sample_from_model(model, device, enc, num_samples=5, max_new_tokens=100, temperature=0.9, top_k=None):
+    model.eval() # Set the model to evaluation mode
+    start_ids = enc.encode("Hello, a language model is")
+    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+    sample_outputs = []
+    for _ in range(num_samples):
+        # Sample from the model
+        with torch.no_grad():
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+        
+        # Decode the generated tokens
+        sample = enc.decode(y[0].tolist())
+        sample_outputs.append(sample)
+    
+    model.train() # Set the model back to training mode
+    return sample_outputs
+
 
 def main():
     # Setup distributed training and device
@@ -145,6 +170,7 @@ def main():
 
     # Load hyperparameters and set seeds
     hyperparameters = load_hyperparameters()
+    enc = tiktoken.get_encoding("gpt2")
     set_seeds()
 
     # Calculate gradient accumulation steps
@@ -158,6 +184,7 @@ def main():
 
     # Initialize data loader
     train_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
+    val_loader = DataLoader(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val") 
 
     # Set up model and optimizer
     torch.set_float32_matmul_precision("high")
@@ -167,8 +194,48 @@ def main():
     print("Starting training loop...")
     for step in range(hyperparameters["max_steps"]):
         t0 = time.time()
+
+        # --- Validation and Sampling ---
+        if step % 10 == 0:
+            print(f"--- Running sampling at step {step + 1} ---")
+            #Validation
+            model.eval()
+            val_loader.reset()
+            with torch.no_grad():
+                val_loss_accum = 0.0
+                val_loss_steps = 5
+
+                for i in range(val_loss_steps):
+                    x, y = val_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+
+                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                        logits, loss = model(x, y)
+
+                    loss = loss / val_loss_steps
+                    val_loss_accum += loss.detach()
+
+            if ddp:
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+
+            if master_process:
+                print(f"Validation Loss:{val_loss_accum.item():.4f}")
+        
+        if step % 10 == 0:
+            model.eval()
+            num_return_sequences = 3
+            max_new_tokens = 32
+            tokens = enc.encode("Hello, a language model is")
+            tokens = torch.tensor(tokens, dtype=torch.long)
+            tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+            xgen = tokens.to(device)
+            sample_rng = torch.Generator
+
+
+        
         optimizer.zero_grad()
         loss_accum = 0.0
+        model.train()
 
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch()
@@ -212,10 +279,12 @@ def main():
             print(f"Step: {step+1}, Loss: {loss_accum.item():.4f}, LR: {lr:.2e}, Time: {dt * 1000:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
 
             # Log metrics to TensorBoard
+            #Training
             writer.add_scalar("Loss/train", loss_accum.item(), step)
             writer.add_scalar("Tokens_per_second", tokens_per_sec, step)
             writer.add_scalar("Learning_rate", lr, step)
             writer.add_scalar("Time_per_step_ms", dt * 1000, step)
+
 
     if ddp:
         destroy_process_group()
