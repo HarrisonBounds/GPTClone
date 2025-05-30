@@ -183,6 +183,11 @@ def main():
     if master_process and not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
+    samples_dir = os.path.join(log_dir, "samples")
+    sample_file = "all_samples.txt"
+    if master_process and not os.path.exists(samples_dir):
+        os.makedirs(samples_dir)
+
     # Load hyperparameters and set seeds
     hyperparameters = load_hyperparameters()
     enc = tiktoken.get_encoding("gpt2")
@@ -213,13 +218,11 @@ def main():
         if step == hyperparameters["max_steps"] - 1:
             last_step = True
 
-        if step % 5000 == 3:
+        if step % 5000 == 0:
             if master_process:
                 save_checkpoint(model, optimizer, step + 1, checkpoint_dir, ddp, hyperparameters)
 
-        # --- Validation and Sampling ---
-        if step % 500 == 3 or last_step:
-            print(f"--- Running sampling at step {step + 1} ---")
+        if step % 500 == 0 or last_step:
             #Validation
             model.eval()
             val_loader.reset()
@@ -245,7 +248,7 @@ def main():
                 print(f"Validation Loss:{val_loss_accum.item():.4f}")
                 writer.add_scalar("Loss/val", val_loss_accum.item(), step)
         
-        if step % 500 == 3 or last_step:
+        if step % 500 == 0 or last_step:
             model.eval()
             num_return_sequences = 3
             max_new_tokens = 32
@@ -267,12 +270,17 @@ def main():
                     xgen = torch.cat((xgen, xcol), dim=1)
 
             if master_process:
-                for i in range(num_return_sequences):
-                    tokens = xgen[i, :max_new_tokens].tolist()
-                    decoded = enc.decode(tokens)
-                    print(f"Rank: {ddp_rank}\nSample: {decoded}")
+                with open(f"{samples_dir}/{sample_file}", 'w') as f:
+                    f.write(f"\n=== Step {step} ===\n")
 
-        if step % 250 == 0 or last_step:
+                    for i in range(num_return_sequences):
+                        tokens = xgen[i, :max_new_tokens].tolist()
+                        decoded = enc.decode(tokens)
+                        #print(f"Rank: {ddp_rank}\nSample: {decoded}")
+
+                        f.write(f"{decoded}\n")
+
+        if step % 500 == 0 or last_step:
             num_correct_norm = 0
             num_total = 0
             for i, example in enumerate(iterate_examples("val")):
