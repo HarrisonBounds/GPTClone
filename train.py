@@ -156,6 +156,16 @@ def sample_from_model(model, device, enc, num_samples=5, max_new_tokens=100, tem
     model.train() # Set the model back to training mode
     return sample_outputs
 
+def save_checkpoint(model, optimizer, step, checkpoint_dir, ddp, hyperparameters):
+    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{step}.pt")
+    torch.save({
+        'step': step,
+        'model_state_dict': model.module.state_dict() if ddp else model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'hyperparameters': hyperparameters,
+    }, checkpoint_path)
+    print(f"Saved checkpoint to {checkpoint_path}")
+
 
 def main():
     # Setup distributed training and device
@@ -168,6 +178,11 @@ def main():
     if master_process:
         writer = SummaryWriter(log_dir)
         print(f"TensorBoard logs will be written to: {log_dir}")
+
+    # Model checkpoints path
+    checkpoint_dir = os.path.join(log_dir, "checkpoints")
+    if master_process and not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
 
     # Load hyperparameters and set seeds
     hyperparameters = load_hyperparameters()
@@ -196,8 +211,12 @@ def main():
     for step in range(hyperparameters["max_steps"]):
         t0 = time.time()
 
+        if step % 5000 == 0:
+            if master_process:
+                save_checkpoint(model, optimizer, step + 1, checkpoint_dir, ddp, hyperparameters)
+
         # --- Validation and Sampling ---
-        if step % 10 == 0:
+        if step % 500 == 0:
             print(f"--- Running sampling at step {step + 1} ---")
             #Validation
             model.eval()
@@ -207,7 +226,7 @@ def main():
                 val_loss_steps = 5
 
                 for i in range(val_loss_steps):
-                    print(f"val step {i}")
+                    #print(f"val step {i}")
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
 
@@ -224,7 +243,7 @@ def main():
                 print(f"Validation Loss:{val_loss_accum.item():.4f}")
                 writer.add_scalar("Loss/val", val_loss_accum.item(), step)
         
-        if step % 10 == 0:
+        if step % 500 == 0:
             model.eval()
             num_return_sequences = 3
             max_new_tokens = 32
