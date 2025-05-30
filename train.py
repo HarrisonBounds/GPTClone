@@ -9,6 +9,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn import functional as F
 
 from gpt2_clone import GPT
 
@@ -206,6 +207,7 @@ def main():
                 val_loss_steps = 5
 
                 for i in range(val_loss_steps):
+                    print(f"val step {i}")
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
 
@@ -220,6 +222,7 @@ def main():
 
             if master_process:
                 print(f"Validation Loss:{val_loss_accum.item():.4f}")
+                writer.add_scalar("Loss/val", val_loss_accum.item(), step)
         
         if step % 10 == 0:
             model.eval()
@@ -229,10 +232,26 @@ def main():
             tokens = torch.tensor(tokens, dtype=torch.long)
             tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
             xgen = tokens.to(device)
-            sample_rng = torch.Generator
+            sample_rng = torch.Generator(device=device)
+            sample_rng.manual_seed(42 + ddp_rank)
 
+            while xgen.size(1) < max_new_tokens:
+                with torch.no_grad():
+                    logits, loss = model(xgen)
+                    logits = logits[:, -1, :]
+                    probs = F.softmax(logits, dim=-1)
+                    topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                    ix = torch.multinomial(topk_probs, 1, generator=sample_rng)
+                    xcol = torch.gather(topk_indices, -1, ix)
+                    xgen = torch.cat((xgen, xcol), dim=1)
 
-        
+            if master_process:
+                for i in range(num_return_sequences):
+                    tokens = xgen[i, :max_new_tokens].tolist()
+                    decoded = enc.decode(tokens)
+                    print(f"Rank: {ddp_rank}\nSample: {decoded}")
+
+    
         optimizer.zero_grad()
         loss_accum = 0.0
         model.train()
