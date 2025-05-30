@@ -10,5 +10,6 @@
     "max_length": 30,
     "warmup_steps": 715,
     "max_steps": 19073,
-    "max_lr": 6e-4
+    "max_lr": 6e-4,
+    "num_epochs": 5
 }
