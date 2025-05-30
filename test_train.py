@@ -4,10 +4,11 @@ import time
 import math
 import numpy as np
 import torch
-import tiktoken # Assuming this is used for tokenization, though not explicitly in the provided code.
+import tiktoken 
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from torch.utils.tensorboard import SummaryWriter
 
 from gpt2_clone import GPT
 
@@ -77,7 +78,6 @@ def get_learning_rate(it, config, min_lr):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (max_lr - min_lr)
 
-# --- Distributed Training Setup ---
 
 def setup_distributed_training():
     ddp = int(os.environ.get('RANK', -1)) != -1
@@ -135,6 +135,13 @@ def main():
     # Setup distributed training and device
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, master_process, device = setup_distributed_training()
     print(f"Using device: {device}")
+
+    # Initialize TensorBoard writer
+    log_dir = os.path.join("runs", time.strftime("%Y%m%d-%H%M%S"))
+    writer = None
+    if master_process:
+        writer = SummaryWriter(log_dir)
+        print(f"TensorBoard logs will be written to: {log_dir}")
 
     # Load hyperparameters and set seeds
     hyperparameters = load_hyperparameters()
@@ -203,6 +210,12 @@ def main():
 
         if master_process:
             print(f"Step: {step+1}, Loss: {loss_accum.item():.4f}, LR: {lr:.2e}, Time: {dt * 1000:.2f} ms, Tokens/sec: {tokens_per_sec:.2f}")
+
+            # Log metrics to TensorBoard
+            writer.add_scalar("Loss/train", loss_accum.item(), step)
+            writer.add_scalar("Tokens_per_second", tokens_per_sec, step)
+            writer.add_scalar("Learning_rate", lr, step)
+            writer.add_scalar("Time_per_step_ms", dt * 1000, step)
 
     if ddp:
         destroy_process_group()
