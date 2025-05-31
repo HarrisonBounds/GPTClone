@@ -155,8 +155,8 @@ def sample_from_model(model, device, enc, num_samples=5, max_new_tokens=100, tem
     model.train() # Set the model back to training mode
     return sample_outputs
 
-def save_checkpoint(model, optimizer, step, checkpoint_dir, ddp, hyperparameters):
-    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{step}.pt")
+def save_checkpoint(model, optimizer, epoch, step, checkpoint_dir, ddp, hyperparameters):
+    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{epoch}_{step}.pt")
     torch.save({
         'step': step,
         'model_state_dict': model.module.state_dict() if ddp else model.state_dict(),
@@ -213,15 +213,19 @@ def main():
 
     print("Starting training loop...")
     last_step = False
-    for epochs in hyperparameters["num_epochs"]:
+    global_step = 0
+    for epoch in range(hyperparameters["num_epochs"]):
+        last_step = False
+
         for step in range(hyperparameters["max_steps"]):
             t0 = time.time()
+
             if step == hyperparameters["max_steps"] - 1:
                 last_step = True
 
-            if step % 5000 == 0:
+            if step % 5000 == 0 or last_step:
                 if master_process:
-                    save_checkpoint(model, optimizer, step + 1, checkpoint_dir, ddp, hyperparameters)
+                    save_checkpoint(model, optimizer, epoch, global_step + 1, checkpoint_dir, ddp, hyperparameters)
 
             if step % 500 == 0 or last_step:
                 #Validation
@@ -247,7 +251,7 @@ def main():
 
                 if master_process:
                     print(f"Validation Loss:{val_loss_accum.item():.4f}")
-                    writer.add_scalar("Loss/val", val_loss_accum.item(), step)
+                    writer.add_scalar("Loss/val", val_loss_accum.item(), global_step)
             
             if step % 500 == 0 or last_step:
                 model.eval()
@@ -309,7 +313,7 @@ def main():
                 acc_norm = num_correct_norm / num_total
                 if master_process:
                     print(f"HellaSwag accuracy: {acc_norm:.4f}")
-                    writer.add_scalar("hellaswag/acc", acc_norm, step)
+                    writer.add_scalar("hellaswag/acc", acc_norm, global_step)
                     
 
             optimizer.zero_grad()
@@ -359,10 +363,12 @@ def main():
 
                 # Log metrics to TensorBoard
                 #Training
-                writer.add_scalar("Loss/train", loss_accum.item(), step)
-                writer.add_scalar("Tokens_per_second", tokens_per_sec, step)
-                writer.add_scalar("Learning_rate", lr, step)
-                writer.add_scalar("Time_per_step_ms", dt * 1000, step)
+                writer.add_scalar("Loss/train", loss_accum.item(), global_step)
+                writer.add_scalar("Tokens_per_second", tokens_per_sec, global_step)
+                writer.add_scalar("Learning_rate", lr, global_step)
+                writer.add_scalar("Time_per_step_ms", dt * 1000, global_step)
+
+            global_step += 1
 
     if ddp:
         destroy_process_group()
