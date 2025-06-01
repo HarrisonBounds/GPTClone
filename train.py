@@ -345,7 +345,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             # Update learning rate
-            lr = get_learning_rate(step, hyperparameters, min_lr)
+            lr = get_learning_rate(global_step, hyperparameters, min_lr)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
